@@ -1,102 +1,108 @@
-import time
 import cv2
 import numpy as np
-from ultralytics import YOLO
+import ncnn
+import time
 
-# ==========================
-# CONFIG (EDIT IF NEEDED)
-# ==========================
-MODEL_PATH = "best.pt"      # your trained model
-CAMERA_INDEX = 0            # default USB webcam
-CONF_THRESH = 0.5
-FRAME_WIDTH = 640
-FRAME_HEIGHT = 480
-# ==========================
+# Load NCNN model
+net = ncnn.Net()
+net.load_param("model.ncnn.param")
+net.load_model("model.ncnn.bin")
 
-# Load YOLO model
-model = YOLO(MODEL_PATH)
-labels = model.names
-
-# Open USB webcam
-cap = cv2.VideoCapture(CAMERA_INDEX)
-cap.set(cv2.CAP_PROP_FRAME_WIDTH, FRAME_WIDTH)
-cap.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_HEIGHT)
-
+# Camera setup
+cap = cv2.VideoCapture(0)  # Use 0 for default USB camera
 if not cap.isOpened():
-    print("ERROR: Could not open webcam")
+    print("Cannot open camera")
     exit()
 
-# Colors for bounding boxes
-bbox_colors = [
-    (164,120,87), (68,148,228), (93,97,209), (178,182,133),
-    (88,159,106), (96,202,231), (159,124,168),
-    (169,162,241), (98,118,150), (172,176,184)
+# YOLOv5 anchors for small model (yolov5n) - change if using different model
+anchors = [
+    [[10,13, 16,30, 33,23]],  # P3/8
+    [[30,61, 62,45, 59,119]], # P4/16
+    [[116,90, 156,198, 373,326]]  # P5/32
 ]
 
+stride = [8,16,32]
+conf_threshold = 0.25
+iou_threshold = 0.45
+input_size = 320  # make sure to use same size as during NCNN export
+
+def sigmoid(x):
+    return 1.0 / (1.0 + np.exp(-x))
+
+def xywh2xyxy(x):
+    # Convert [x_center, y_center, w, h] to [x1, y1, x2, y2]
+    y = np.zeros_like(x)
+    y[0] = x[0] - x[2]/2
+    y[1] = x[1] - x[3]/2
+    y[2] = x[0] + x[2]/2
+    y[3] = x[1] + x[3]/2
+    return y
+
+# Main loop
 fps_buffer = []
-FPS_AVG_LEN = 20
-
-print("YOLO detection started. Press Q to quit.")
-
 while True:
-    t_start = time.perf_counter()
-
+    t0 = time.time()
     ret, frame = cap.read()
     if not ret:
-        print("Failed to grab frame")
         break
 
-    # Run YOLO inference
-    results = model(frame, verbose=False)
-    detections = results[0].boxes
+    h, w, _ = frame.shape
 
-    object_count = 0
+    # Convert BGR -> RGB and resize
+    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    in_mat = ncnn.Mat.from_pixels_resize(rgb_frame, ncnn.Mat.PIXEL_RGB, w, h, input_size, input_size)
+    # Normalize to 0-1
+    in_mat.substract_mean_normalize(mean=[0,0,0], norm=[1/255.0,1/255.0,1/255.0])
 
-    for det in detections:
-        conf = det.conf.item()
-        if conf < CONF_THRESH:
+    # Create extractor and run inference
+    ex = net.create_extractor()
+    ex.input("images", in_mat)
+    out_mat = ncnn.Mat()
+    ex.extract("output", out_mat)
+
+    # Convert output to numpy array
+    out = np.array(out_mat)
+
+    # Postprocess (YOLOv5 NMS)
+    boxes = []
+    scores = []
+    class_ids = []
+
+    for det in out:
+        conf = det[4]
+        if conf < conf_threshold:
             continue
+        cls_id = np.argmax(det[5:])
+        cls_conf = det[5+cls_id]
+        final_conf = conf * cls_conf
+        if final_conf < conf_threshold:
+            continue
+        cx, cy, bw, bh = det[0], det[1], det[2], det[3]
+        box = xywh2xyxy([cx* w/input_size, cy* h/input_size, bw* w/input_size, bh* h/input_size])
+        boxes.append(box)
+        scores.append(final_conf)
+        class_ids.append(cls_id)
 
-        xyxy = det.xyxy.cpu().numpy().squeeze().astype(int)
-        xmin, ymin, xmax, ymax = xyxy
-
-        class_id = int(det.cls.item())
-        label = labels[class_id]
-
-        color = bbox_colors[class_id % len(bbox_colors)]
-
-        cv2.rectangle(frame, (xmin, ymin), (xmax, ymax), color, 2)
-        text = f"{label} {int(conf*100)}%"
-        cv2.putText(
-            frame, text, (xmin, ymin - 5),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2
-        )
-
-        object_count += 1
+    # Draw boxes
+    for i in range(len(boxes)):
+        x1, y1, x2, y2 = boxes[i].astype(int)
+        cv2.rectangle(frame, (x1,y1), (x2,y2), (0,255,0), 2)
+        label = f"{class_ids[i]}:{scores[i]:.2f}"
+        cv2.putText(frame, label, (x1,y1-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,0), 2)
 
     # FPS calculation
-    t_end = time.perf_counter()
-    fps = 1 / (t_end - t_start)
+    t1 = time.time()
+    fps = 1/(t1-t0)
     fps_buffer.append(fps)
-    if len(fps_buffer) > FPS_AVG_LEN:
+    if len(fps_buffer) > 30:
         fps_buffer.pop(0)
+    avg_fps = sum(fps_buffer)/len(fps_buffer)
+    cv2.putText(frame, f"FPS: {avg_fps:.2f}", (10,30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,255), 2)
 
-    avg_fps = sum(fps_buffer) / len(fps_buffer)
-
-    # Overlay info
-    cv2.putText(frame, f"FPS: {avg_fps:.2f}", (10, 20),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,255), 2)
-
-    cv2.putText(frame, f"Objects: {object_count}", (10, 45),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,255), 2)
-
-    # Show frame
-    cv2.imshow("YOLO Pi Webcam", frame)
-
-    if cv2.waitKey(1) & 0xFF in [ord('q'), ord('Q')]:
+    cv2.imshow("YOLOv5 NCNN", frame)
+    key = cv2.waitKey(1)
+    if key == ord('q'):
         break
 
-# Cleanup
 cap.release()
 cv2.destroyAllWindows()
-print("Exited cleanly.")
