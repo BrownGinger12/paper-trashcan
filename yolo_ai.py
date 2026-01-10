@@ -94,8 +94,8 @@ class YOLOv5Detector:
 # ===========================
 # CONFIGURATION
 # ===========================
-MODEL_PARAM = "yolov5n.param"  # NCNN param file
-MODEL_BIN = "yolov5n.bin"      # NCNN bin file
+MODEL_PARAM = "model.ncnn.param"  # NCNN param file
+MODEL_BIN = "model.ncnn.bin"      # NCNN bin file
 CAM_INDEX = 0                  # webcam (usually 0 on Pi)
 SERIAL_PORT = "/dev/ttyUSB0"   # Arduino serial port on Pi
 BAUD_RATE = 9600
