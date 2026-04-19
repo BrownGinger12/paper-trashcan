@@ -11,7 +11,7 @@ from tkinter import font as tkfont
 CONF_THRESHOLD = 0.70
 SERIAL_PORT = '/dev/ttyUSB0'
 BAUD_RATE = 9600
-OPEN_FRAMES_REQUIRED = 5
+OPEN_FRAMES_REQUIRED = 1
 CLOSE_DELAY = 0.5
 
 
