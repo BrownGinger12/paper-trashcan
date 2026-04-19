@@ -48,9 +48,11 @@ class SystemState:
         self.weight_kg = 0.0
         self.battery_percent = 100
         self.paper_detected_count = 0
+        self.plastic_detected_count = 0
         self.last_detection_conf = 0.0
         self.last_no_paper_time = 0
         self.running = True
+        self.detected_material = "NONE"  # "PAPER", "PLASTIC", or "NONE"
 
 state = SystemState()
 
@@ -60,7 +62,7 @@ state = SystemState()
 class MinimalGUI:
     def __init__(self, root):
         self.root = root
-        self.root.title("Paper Detection")
+        self.root.title("Waste Detection System")
         self.root.configure(bg='black')
         
         # Make fullscreen (optional - comment out if not needed)
@@ -74,6 +76,18 @@ class MinimalGUI:
         self.video_canvas = tk.Canvas(main_frame, width=640, height=480, 
                                       bg='black', highlightthickness=0)
         self.video_canvas.pack(pady=10)
+        
+        # Material Detection Display (BIG TEXT)
+        self.material_label = tk.Label(main_frame, text="NO DETECTION", 
+                                       font=('Arial', 48, 'bold'), 
+                                       bg='black', fg='#888')
+        self.material_label.pack(pady=20)
+        
+        # Bin Status Display (BIG TEXT)
+        self.bin_status_label = tk.Label(main_frame, text="", 
+                                         font=('Arial', 42, 'bold'), 
+                                         bg='black', fg='#E74C3C')
+        self.bin_status_label.pack(pady=10)
         
         # Info bar
         info_frame = tk.Frame(main_frame, bg='black')
@@ -114,32 +128,57 @@ class MinimalGUI:
                           device="cpu", verbose=False)
             
             paper_detected = False
+            plastic_detected = False
             max_conf = 0.0
+            detected_class = "NONE"
             
             for r in results:
                 if r.boxes:
                     for box in r.boxes:
                         cls_id = int(box.cls[0])
                         conf = float(box.conf[0])
-                        class_name = model.names[cls_id]
+                        class_name = model.names[cls_id].lower()
                         
-                        if class_name.lower() == "paper" and conf >= CONF_THRESHOLD:
-                            paper_detected = True
-                            max_conf = max(max_conf, conf)
+                        if conf >= CONF_THRESHOLD:
+                            if class_name == "paper":
+                                paper_detected = True
+                                if conf > max_conf:
+                                    max_conf = conf
+                                    detected_class = "PAPER"
+                                
+                                # Draw bounding box (green for paper)
+                                x1, y1, x2, y2 = map(int, box.xyxy[0])
+                                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 3)
+                                cv2.putText(frame, f"PAPER {conf:.2f}", (x1, y1 - 10),
+                                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
                             
-                            # Draw bounding box
-                            x1, y1, x2, y2 = map(int, box.xyxy[0])
-                            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 3)
-                            cv2.putText(frame, f"Paper {conf:.2f}", (x1, y1 - 10),
-                                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                            elif class_name == "plastic":
+                                plastic_detected = True
+                                if conf > max_conf:
+                                    max_conf = conf
+                                    detected_class = "PLASTIC"
+                                
+                                # Draw bounding box (blue for plastic)
+                                x1, y1, x2, y2 = map(int, box.xyxy[0])
+                                cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 165, 0), 3)
+                                cv2.putText(frame, f"PLASTIC {conf:.2f}", (x1, y1 - 10),
+                                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 165, 0), 2)
             
-            # Update detection count
+            # Update detection counts
             if paper_detected:
                 state.paper_detected_count += 1
-                state.last_detection_conf = max_conf
+                state.plastic_detected_count = 0
+                state.detected_material = "PAPER"
+            elif plastic_detected:
+                state.plastic_detected_count += 1
+                state.paper_detected_count = 0
+                state.detected_material = "PLASTIC"
             else:
                 state.paper_detected_count = 0
-                state.last_detection_conf = 0.0
+                state.plastic_detected_count = 0
+                state.detected_material = "NONE"
+            
+            state.last_detection_conf = max_conf
             
             # Read from Arduino
             if arduino:
@@ -161,14 +200,15 @@ class MinimalGUI:
                 except:
                     pass
             
-            # Servo control logic
+            # Servo control logic (for paper only, as original)
             if arduino:
-                if state.paper_detected_count >= OPEN_FRAMES_REQUIRED and state.weight_kg < MAX_WEIGHT_KG:
+                detected_count = max(state.paper_detected_count, state.plastic_detected_count)
+                if detected_count >= OPEN_FRAMES_REQUIRED and state.weight_kg < MAX_WEIGHT_KG:
                     if not state.servo_open:
                         arduino.write(b"open\n")
                         state.servo_open = True
-                        print(f"[OPEN] weight: {state.weight_kg:.2f}kg")
-                elif state.paper_detected_count < OPEN_FRAMES_REQUIRED:
+                        print(f"[OPEN] {state.detected_material} - weight: {state.weight_kg:.2f}kg")
+                elif detected_count < OPEN_FRAMES_REQUIRED:
                     if state.servo_open and (time.time() - state.last_no_paper_time >= CLOSE_DELAY):
                         arduino.write(b"close\n")
                         state.servo_open = False
@@ -190,6 +230,20 @@ class MinimalGUI:
             self.root.after(50, self.update_frame)
     
     def update_info(self):
+        # Update material detection display
+        if state.detected_material == "PAPER":
+            self.material_label.config(text="📄 PAPER DETECTED", fg='#27AE60')
+        elif state.detected_material == "PLASTIC":
+            self.material_label.config(text="♻️ PLASTIC DETECTED", fg='#3498DB')
+        else:
+            self.material_label.config(text="NO DETECTION", fg='#888')
+        
+        # Update bin full status
+        if state.weight_kg >= MAX_WEIGHT_KG:
+            self.bin_status_label.config(text="⚠️ BIN IS FULL ⚠️", fg='#E74C3C')
+        else:
+            self.bin_status_label.config(text="")
+        
         # Update battery with color
         battery = state.battery_percent
         if battery > 50:
@@ -201,8 +255,15 @@ class MinimalGUI:
         
         self.battery_label.config(text=f"{battery}%", fg=battery_color)
         
-        # Update weight
-        self.weight_label.config(text=f"{state.weight_kg:.2f} kg")
+        # Update weight with color based on fullness
+        if state.weight_kg >= MAX_WEIGHT_KG:
+            weight_color = '#E74C3C'  # Red when full
+        elif state.weight_kg >= MAX_WEIGHT_KG * 0.8:
+            weight_color = '#F39C12'  # Orange when 80% full
+        else:
+            weight_color = '#3498DB'  # Blue normal
+        
+        self.weight_label.config(text=f"{state.weight_kg:.2f} kg", fg=weight_color)
     
     def on_closing(self):
         state.running = False
@@ -216,7 +277,7 @@ class MinimalGUI:
 # Main
 # =========================
 def main():
-    print("[INFO] Starting minimal GUI for Raspberry Pi")
+    print("[INFO] Starting waste detection system for Raspberry Pi")
     
     root = tk.Tk()
     app = MinimalGUI(root)
