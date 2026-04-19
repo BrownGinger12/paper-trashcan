@@ -139,6 +139,9 @@ class MinimalGUI:
                         conf = float(box.conf[0])
                         class_name = model.names[cls_id].lower()
                         
+                        # Debug: print what's being detected
+                        print(f"[DEBUG] Detected: {class_name} with confidence {conf:.2f}")
+                        
                         if conf >= CONF_THRESHOLD:
                             if class_name == "paper":
                                 paper_detected = True
@@ -200,15 +203,15 @@ class MinimalGUI:
                 except:
                     pass
             
-            # Servo control logic (for paper only, as original)
+            # Servo control logic (ONLY for paper, not plastic)
             if arduino:
-                detected_count = max(state.paper_detected_count, state.plastic_detected_count)
-                if detected_count >= OPEN_FRAMES_REQUIRED and state.weight_kg < MAX_WEIGHT_KG:
+                # Only open for paper detection
+                if state.paper_detected_count >= OPEN_FRAMES_REQUIRED and state.weight_kg < MAX_WEIGHT_KG:
                     if not state.servo_open:
                         arduino.write(b"open\n")
                         state.servo_open = True
-                        print(f"[OPEN] {state.detected_material} - weight: {state.weight_kg:.2f}kg")
-                elif detected_count < OPEN_FRAMES_REQUIRED:
+                        print(f"[OPEN] PAPER - weight: {state.weight_kg:.2f}kg")
+                elif state.paper_detected_count < OPEN_FRAMES_REQUIRED:
                     if state.servo_open and (time.time() - state.last_no_paper_time >= CLOSE_DELAY):
                         arduino.write(b"close\n")
                         state.servo_open = False
@@ -278,6 +281,8 @@ class MinimalGUI:
 # =========================
 def main():
     print("[INFO] Starting waste detection system for Raspberry Pi")
+    print(f"[INFO] Model classes: {model.names}")
+    print(f"[INFO] Confidence threshold: {CONF_THRESHOLD}")
     
     root = tk.Tk()
     app = MinimalGUI(root)
