@@ -8,7 +8,7 @@ from tkinter import font as tkfont
 # =========================
 # CONFIGURATION
 # =========================
-CONF_THRESHOLD = 0.85
+CONF_THRESHOLD = 0.70
 SERIAL_PORT = '/dev/ttyUSB0'
 BAUD_RATE = 9600
 OPEN_FRAMES_REQUIRED = 5
@@ -48,6 +48,7 @@ class SystemState:
     def __init__(self):
         self.servo_open = False
         self.fill_level = 0.0        # % from ultrasonic
+        self.fill_level_samples = []
         self.battery_percent = 100
         self.paper_detected_count = 0
         self.last_detection_conf = 0.0
@@ -270,7 +271,11 @@ class PaperTrashcanGUI:
                         if raw.startswith("fill level:"):
                             val = raw.replace("fill level:", "").replace("%", "").strip()
                             try:
-                                state.fill_level = float(val)
+                                reading = float(val)
+                                state.fill_level_samples.append(reading)
+                                if len(state.fill_level_samples) >= 5:
+                                    state.fill_level = sum(state.fill_level_samples[-5:]) / 5.0
+                                    state.fill_level_samples.clear()
                             except:
                                 pass
 
@@ -316,12 +321,12 @@ class PaperTrashcanGUI:
                     and state.paper_detected_count >= OPEN_FRAMES_REQUIRED)
 
         if state.last_detection_class == "plastic":
-            self.status_label.config(text="PLASTIC DETECTED", fg=ACCENT_RED)
+            self.status_label.config(text="PLASTIC DETECTED — NOT ACCEPTED", fg=ACCENT_RED)
             self.icon_label.config(text="🧴", fg=ACCENT_RED)
             conf_pct = f"{state.last_detection_conf * 100:.1f}%"
             self.conf_label.config(text=conf_pct, fg=ACCENT_RED)
         elif state.last_detection_class == "mixed":
-            self.status_label.config(text="PAPER + PLASTIC", fg=ACCENT_RED)
+            self.status_label.config(text="PAPER + PLASTIC — NOT ACCEPTED", fg=ACCENT_RED)
             self.icon_label.config(text="⚠️", fg=ACCENT_RED)
             conf_pct = f"{state.last_detection_conf * 100:.1f}%"
             self.conf_label.config(text=conf_pct, fg=ACCENT_RED)
@@ -353,11 +358,11 @@ class PaperTrashcanGUI:
         if fill >= 100:
             cap_color = ACCENT_RED
             cap_text = "BIN IS FULL"
-            cap_font = ("Courier", 16, "bold")
+            cap_font = ("Courier", 20, "bold")
         elif fill >= 90:
             cap_color = ACCENT_RED
             cap_text  = "FULL — EMPTY BIN"
-            cap_font = ("Courier", 9)
+            cap_font = ("Courier", 11, "bold")
         elif fill >= 70:
             cap_color = ACCENT_YLW
             cap_text  = "GETTING FULL"
