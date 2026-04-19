@@ -65,33 +65,40 @@ class MinimalGUI:
         self.root.title("Waste Detection System")
         self.root.configure(bg='black')
         
+        print("[DEBUG] Initializing GUI...")
+        
         # Make fullscreen (optional - comment out if not needed)
         # self.root.attributes('-fullscreen', True)
         
         # Main container
         main_frame = tk.Frame(self.root, bg='black')
         main_frame.pack(fill=tk.BOTH, expand=True)
+        print("[DEBUG] Main frame created")
         
         # Video canvas
         self.video_canvas = tk.Canvas(main_frame, width=640, height=480, 
                                       bg='black', highlightthickness=0)
         self.video_canvas.pack(pady=10)
+        print("[DEBUG] Video canvas created")
         
         # Material Detection Display (BIG TEXT)
         self.material_label = tk.Label(main_frame, text="NO DETECTION", 
                                        font=('Arial', 48, 'bold'), 
                                        bg='black', fg='#888')
         self.material_label.pack(pady=20)
+        print("[DEBUG] Material label created")
         
         # Bin Status Display (BIG TEXT)
         self.bin_status_label = tk.Label(main_frame, text="", 
                                          font=('Arial', 42, 'bold'), 
                                          bg='black', fg='#E74C3C')
         self.bin_status_label.pack(pady=10)
+        print("[DEBUG] Bin status label created")
         
         # Info bar
         info_frame = tk.Frame(main_frame, bg='black')
         info_frame.pack(fill=tk.X, padx=20, pady=10)
+        print("[DEBUG] Info frame created")
         
         # Battery display
         battery_frame = tk.Frame(info_frame, bg='black')
@@ -103,6 +110,7 @@ class MinimalGUI:
                                       font=('Arial', 32, 'bold'), 
                                       bg='black', fg='#27AE60')
         self.battery_label.pack()
+        print("[DEBUG] Battery display created")
         
         # Weight display
         weight_frame = tk.Frame(info_frame, bg='black')
@@ -114,14 +122,22 @@ class MinimalGUI:
                                      font=('Arial', 32, 'bold'), 
                                      bg='black', fg='#3498DB')
         self.weight_label.pack()
+        print("[DEBUG] Weight display created")
         
         # Bind ESC key to exit
         self.root.bind('<Escape>', lambda e: self.on_closing())
         
+        print("[DEBUG] Starting update loop...")
         self.update_frame()
         
     def update_frame(self):
         ret, frame = cap.read()
+        if not ret:
+            print("[ERROR] Failed to read from camera")
+            if state.running:
+                self.root.after(50, self.update_frame)
+            return
+            
         if ret:
             # Run YOLO detection
             results = model(frame, imgsz=416, conf=CONF_THRESHOLD, 
