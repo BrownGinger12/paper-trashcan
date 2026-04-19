@@ -1,294 +1,352 @@
-import tkinter as tk
-from PIL import Image, ImageTk
+from ultralytics import YOLO
 import cv2
-import serial
 import time
+import serial
+import tkinter as tk
+from tkinter import ttk
+from PIL import Image, ImageTk
 import threading
-import numpy as np
-import ncnn
 
-# ===========================
-# YOLO NCNN DETECTOR CLASS
-# ===========================
-class YOLOv5Detector:
-    def __init__(self, param_path, bin_path, target_size=320, conf_threshold=0.5, nms_threshold=0.45):
-        self.net = ncnn.Net()
-        self.net.opt.use_vulkan_compute = False
-        self.net.opt.num_threads = 4  # Adjust based on your Pi model (2-4)
-        self.net.load_param(param_path)
-        self.net.load_model(bin_path)
-        
-        self.target_size = target_size
-        self.conf_threshold = conf_threshold
-        self.nms_threshold = nms_threshold
-        
-        # CUSTOM CLASS - Only detecting paper
-        self.class_names = ['paper']  # Single class detection
-    
-    def detect(self, img):
-        img_h, img_w = img.shape[:2]
-        
-        # Prepare input
-        mat_in = ncnn.Mat.from_pixels_resize(
-            img, ncnn.Mat.PixelType.PIXEL_BGR2RGB, 
-            img_w, img_h, self.target_size, self.target_size
-        )
-        
-        # Normalize
-        norm_vals = [1/255.0, 1/255.0, 1/255.0]
-        mat_in.substract_mean_normalize([], norm_vals)
-        
-        # Inference
-        ex = self.net.create_extractor()
-        ex.input("images", mat_in)
-        
-        mat_out = ncnn.Mat()
-        ex.extract("output0", mat_out)
-        
-        # Post-process
-        detections = self.post_process(mat_out, img_w, img_h)
-        return detections
-    
-    def post_process(self, mat_out, img_w, img_h):
-        # Convert ncnn.Mat to numpy
-        out = np.array(mat_out).reshape(-1, mat_out.w)
-        
-        boxes = []
-        confidences = []
-        class_ids = []
-        
-        for detection in out:
-            # For single-class model, confidence is just detection[4]
-            confidence = detection[4]
-            
-            if confidence > self.conf_threshold:
-                # Scale coordinates back to original image size
-                x_center = detection[0] * img_w / self.target_size
-                y_center = detection[1] * img_h / self.target_size
-                width = detection[2] * img_w / self.target_size
-                height = detection[3] * img_h / self.target_size
-                
-                # Convert to top-left corner format
-                x = int(x_center - width / 2)
-                y = int(y_center - height / 2)
-                
-                boxes.append([x, y, int(width), int(height)])
-                confidences.append(float(confidence))
-                class_ids.append(0)  # Single class = 0
-        
-        # Apply NMS
-        indices = cv2.dnn.NMSBoxes(boxes, confidences, self.conf_threshold, self.nms_threshold)
-        
-        results = []
-        if len(indices) > 0:
-            for i in indices.flatten():
-                results.append({
-                    'box': boxes[i],
-                    'confidence': confidences[i],
-                    'class_id': class_ids[i],
-                    'class_name': 'paper'
-                })
-        
-        return results
-
-# ===========================
+# =========================
 # CONFIGURATION
-# ===========================
-MODEL_PARAM = "model.ncnn.param"  # NCNN param file
-MODEL_BIN = "model.ncnn.bin"      # NCNN bin file
-CAM_INDEX = 0                  # webcam (usually 0 on Pi)
-SERIAL_PORT = "/dev/ttyUSB0"   # Arduino serial port on Pi
+# =========================
+CONF_THRESHOLD = 0.85
+SERIAL_PORT = 'COM6'
 BAUD_RATE = 9600
+MAX_WEIGHT_KG = 1.0
+OPEN_FRAMES_REQUIRED = 5
+CLOSE_DELAY = 0.5
 
-# Display settings for 320x240 screen
-DISPLAY_WIDTH = 320
-DISPLAY_HEIGHT = 240
-CAMERA_WIDTH = 320
-CAMERA_HEIGHT = 240
-
-SERVO_OPEN = "open\n"
-SERVO_CLOSE = "close\n"
-
-# Serial setup
+# =========================
+# Initialize Serial to Arduino
+# =========================
 try:
     arduino = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1)
     time.sleep(2)
-    print("Serial connected")
+    print(f"[INFO] Serial connected to {SERIAL_PORT}")
 except Exception as e:
-    print(f"Serial connection failed: {e}")
+    print(f"[ERROR] Could not connect to Arduino: {e}")
     arduino = None
 
-# Load YOLO NCNN model
-model = YOLOv5Detector(MODEL_PARAM, MODEL_BIN, target_size=320, conf_threshold=0.4)
-print("NCNN Model loaded")
+# =========================
+# Load YOLO model
+# =========================
+model = YOLO("/home/ecechmsu/Desktop/paper-trashcan/my_model.pt")
 
-# ===========================
-# TKINTER GUI - Optimized for 320x240
-# ===========================
-class AIWeightApp:
+# =========================
+# Camera setup
+# =========================
+cap = cv2.VideoCapture(0)
+cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+cap.set(cv2.CAP_PROP_FPS, 10)
+
+# =========================
+# Global State
+# =========================
+class SystemState:
+    def __init__(self):
+        self.servo_open = False
+        self.weight_kg = 0.0
+        self.paper_detected_count = 0
+        self.last_detection_conf = 0.0
+        self.last_no_paper_time = 0
+        self.running = True
+        self.fps = 0
+        self.frame_count = 0
+        self.last_fps_time = time.time()
+
+state = SystemState()
+
+# =========================
+# GUI Class
+# =========================
+class PaperDetectionGUI:
     def __init__(self, root):
         self.root = root
-        root.overrideredirect(True)
-        root.geometry(f"{DISPLAY_WIDTH}x{DISPLAY_HEIGHT}+0+0")
-        root.configure(bg="black")
-
-        # Camera
-        self.cap = cv2.VideoCapture(CAM_INDEX)
-        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAMERA_WIDTH)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_HEIGHT)
-        self.imgtk = None
-
-        # Main container
-        self.main_frame = tk.Frame(root, bg="black")
-        self.main_frame.pack(fill=tk.BOTH, expand=True)
-
-        # Top: Video feed (180 pixels tall)
-        self.video_canvas = tk.Canvas(self.main_frame, width=320, height=180, 
-                                      bg="black", highlightthickness=0)
-        self.video_canvas.pack(side=tk.TOP)
-
-        # Bottom: Info panel (60 pixels tall)
-        self.info_frame = tk.Frame(self.main_frame, bg="black", height=60)
-        self.info_frame.pack(side=tk.BOTTOM, fill=tk.X)
-        self.info_frame.pack_propagate(False)
-
-        # Info labels - compact layout
-        self.weight_label = tk.Label(self.info_frame, text="W: --- kg", 
-                                     font=("Arial", 14, "bold"), fg="lime", bg="black")
-        self.weight_label.pack(side=tk.LEFT, padx=10)
-
-        self.battery_label = tk.Label(self.info_frame, text="B: ---%", 
-                                      font=("Arial", 14, "bold"), fg="yellow", bg="black")
-        self.battery_label.pack(side=tk.LEFT, padx=10)
-
-        self.status_label = tk.Label(self.info_frame, text="●", 
-                                     font=("Arial", 20), fg="red", bg="black")
-        self.status_label.pack(side=tk.RIGHT, padx=10)
-
-        # Control variables
-        self.weight_kg = 0.0
-        self.battery_percent = 0
-        self.object_detected = False
-        self.fps = 0
-
-        # Start threads
-        self.running = True
-        if arduino:
-            threading.Thread(target=self.read_serial, daemon=True).start()
+        self.root.title("Smart Paper Trashcan Detection System")
+        self.root.geometry("1100x700")
+        self.root.configure(bg='#2C3E50')
+        
+        # Configure style
+        style = ttk.Style()
+        style.theme_use('clam')
+        style.configure('TFrame', background='#2C3E50')
+        style.configure('TLabel', background='#2C3E50', foreground='white', font=('Arial', 10))
+        style.configure('Title.TLabel', font=('Arial', 16, 'bold'))
+        style.configure('Stat.TLabel', font=('Arial', 24, 'bold'), foreground='#3498DB')
+        style.configure('TButton', font=('Arial', 11, 'bold'), padding=10)
+        
+        self.create_widgets()
         self.update_frame()
-
-    def read_serial(self):
-        """Continuously read weight & battery from Arduino"""
-        buffer = ""
-        while self.running:
-            try:
-                if arduino.in_waiting:
-                    buffer += arduino.read(arduino.in_waiting).decode('utf-8', errors='ignore')
-                    lines = buffer.split("\n")
-                    buffer = lines[-1]
-
-                    for line in lines[:-1]:
-                        line = line.strip().lower()
-
-                        # WEIGHT
-                        if "weigth:" in line or "weight:" in line:
-                            try:
-                                value_str = line.replace("weigth:", "").replace("weight:", "").replace("kg","").strip()
-                                self.weight_kg = float(value_str)
-                                self.weight_label.config(text=f"W: {self.weight_kg:.2f}kg")
-                            except:
-                                pass
-
-                        # BATTERY
-                        elif "battery:" in line:
-                            try:
-                                value_str = line.replace("battery:", "").strip()
-                                self.battery_percent = int(value_str)
-                                self.battery_label.config(text=f"B: {self.battery_percent}%")
-                            except:
-                                pass
-
-            except Exception as e:
-                print("Serial read error:", e)
-
-            time.sleep(0.05)
-
-    def send_servo_command(self, command):
+        
+    def create_widgets(self):
+        # Main container
+        main_frame = ttk.Frame(self.root, padding="10")
+        main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        self.root.columnconfigure(0, weight=1)
+        self.root.rowconfigure(0, weight=1)
+        
+        # Title
+        title = ttk.Label(main_frame, text="🗑️ Smart Paper Trashcan AI System", 
+                         style='Title.TLabel')
+        title.grid(row=0, column=0, columnspan=2, pady=(0, 20))
+        
+        # Left Panel - Video Feed
+        left_frame = ttk.Frame(main_frame)
+        left_frame.grid(row=1, column=0, padx=(0, 10), sticky=(tk.N, tk.S, tk.E, tk.W))
+        
+        video_label = ttk.Label(left_frame, text="Camera Feed", style='Title.TLabel')
+        video_label.pack(pady=(0, 10))
+        
+        self.video_canvas = tk.Canvas(left_frame, width=640, height=480, bg='black', 
+                                      highlightthickness=2, highlightbackground='#3498DB')
+        self.video_canvas.pack()
+        
+        # Status indicator below video
+        status_frame = ttk.Frame(left_frame)
+        status_frame.pack(pady=10, fill=tk.X)
+        
+        ttk.Label(status_frame, text="Servo Status:", font=('Arial', 12)).pack(side=tk.LEFT, padx=5)
+        self.servo_status_label = tk.Label(status_frame, text="CLOSED", 
+                                           font=('Arial', 12, 'bold'),
+                                           bg='#E74C3C', fg='white', 
+                                           padx=20, pady=5, relief=tk.RAISED)
+        self.servo_status_label.pack(side=tk.LEFT, padx=5)
+        
+        # FPS Counter
+        self.fps_label = ttk.Label(status_frame, text="FPS: 0", font=('Arial', 10))
+        self.fps_label.pack(side=tk.RIGHT, padx=5)
+        
+        # Right Panel - Stats and Controls
+        right_frame = ttk.Frame(main_frame)
+        right_frame.grid(row=1, column=1, sticky=(tk.N, tk.S, tk.E, tk.W))
+        
+        # Detection Stats
+        stats_frame = ttk.LabelFrame(right_frame, text="Detection Statistics", padding="15")
+        stats_frame.pack(fill=tk.X, pady=(0, 15))
+        
+        # Paper Detection Confidence
+        ttk.Label(stats_frame, text="Detection Confidence:").pack(anchor=tk.W)
+        self.conf_label = ttk.Label(stats_frame, text="0%", style='Stat.TLabel')
+        self.conf_label.pack(anchor=tk.W, pady=(0, 5))
+        
+        self.conf_progress = ttk.Progressbar(stats_frame, length=300, mode='determinate')
+        self.conf_progress.pack(fill=tk.X, pady=(0, 15))
+        
+        # Consecutive Frames
+        ttk.Label(stats_frame, text="Consecutive Frames Detected:").pack(anchor=tk.W)
+        self.frames_label = ttk.Label(stats_frame, text="0 / 5", style='Stat.TLabel')
+        self.frames_label.pack(anchor=tk.W, pady=(0, 5))
+        
+        self.frames_progress = ttk.Progressbar(stats_frame, length=300, mode='determinate')
+        self.frames_progress.pack(fill=tk.X, pady=(0, 15))
+        
+        # Weight Display
+        ttk.Label(stats_frame, text="Current Weight:").pack(anchor=tk.W)
+        self.weight_label = ttk.Label(stats_frame, text="0.00 kg", style='Stat.TLabel')
+        self.weight_label.pack(anchor=tk.W)
+        
+        # System Info
+        info_frame = ttk.LabelFrame(right_frame, text="System Configuration", padding="15")
+        info_frame.pack(fill=tk.X, pady=(0, 15))
+        
+        info_data = [
+            ("Confidence Threshold:", f"{int(CONF_THRESHOLD * 100)}%"),
+            ("Max Weight:", f"{MAX_WEIGHT_KG} kg"),
+            ("Required Frames:", str(OPEN_FRAMES_REQUIRED)),
+            ("Close Delay:", f"{CLOSE_DELAY}s")
+        ]
+        
+        for label, value in info_data:
+            row_frame = ttk.Frame(info_frame)
+            row_frame.pack(fill=tk.X, pady=2)
+            ttk.Label(row_frame, text=label, font=('Arial', 9)).pack(side=tk.LEFT)
+            ttk.Label(row_frame, text=value, font=('Arial', 9, 'bold'), 
+                     foreground='#3498DB').pack(side=tk.RIGHT)
+        
+        # Manual Controls
+        control_frame = ttk.LabelFrame(right_frame, text="Manual Controls", padding="15")
+        control_frame.pack(fill=tk.X, pady=(0, 15))
+        
+        self.open_btn = tk.Button(control_frame, text="🔓 OPEN LID", 
+                                  command=self.open_servo,
+                                  bg='#27AE60', fg='white', font=('Arial', 12, 'bold'),
+                                  relief=tk.RAISED, bd=3, cursor='hand2')
+        self.open_btn.pack(fill=tk.X, pady=(0, 10))
+        
+        self.close_btn = tk.Button(control_frame, text="🔒 CLOSE LID", 
+                                   command=self.close_servo,
+                                   bg='#E74C3C', fg='white', font=('Arial', 12, 'bold'),
+                                   relief=tk.RAISED, bd=3, cursor='hand2')
+        self.close_btn.pack(fill=tk.X)
+        
+        # Log Area
+        log_frame = ttk.LabelFrame(right_frame, text="Activity Log", padding="10")
+        log_frame.pack(fill=tk.BOTH, expand=True)
+        
+        self.log_text = tk.Text(log_frame, height=8, width=40, bg='#34495E', 
+                               fg='#ECF0F1', font=('Courier', 9), relief=tk.SUNKEN)
+        self.log_text.pack(fill=tk.BOTH, expand=True)
+        
+        scrollbar = ttk.Scrollbar(log_frame, command=self.log_text.yview)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.log_text.config(yscrollcommand=scrollbar.set)
+        
+        self.add_log("System initialized")
         if arduino:
-            try:
-                arduino.write(command.encode())
-            except:
-                print("Failed to send serial command")
-
+            self.add_log(f"Arduino connected on {SERIAL_PORT}")
+        else:
+            self.add_log("WARNING: Arduino not connected")
+    
+    def add_log(self, message):
+        timestamp = time.strftime("%H:%M:%S")
+        self.log_text.insert(tk.END, f"[{timestamp}] {message}\n")
+        self.log_text.see(tk.END)
+    
+    def open_servo(self):
+        if arduino:
+            arduino.write(b"open\n")
+            state.servo_open = True
+            self.add_log("Manual OPEN command sent")
+    
+    def close_servo(self):
+        if arduino:
+            arduino.write(b"close\n")
+            state.servo_open = False
+            self.add_log("Manual CLOSE command sent")
+    
     def update_frame(self):
-        t_start = time.time()
-
-        ret, frame = self.cap.read()
+        ret, frame = cap.read()
         if ret:
-            # Resize to fit display (320x180 for video area)
-            frame = cv2.resize(frame, (320, 180))
-            display = frame.copy()
-
-            # Run YOLO NCNN detection
-            detections = model.detect(frame)
-            detected = False
-
-            for det in detections:
-                x, y, w, h = det['box']
-                conf = det['confidence']
-                
-                detected = True
-                color = (0, 255, 0)
-                cv2.rectangle(display, (x, y), (x+w, y+h), color, 1)
-                
-                # Compact label
-                label = f"{int(conf*100)}%"
-                cv2.putText(display, label, (x, y-5), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
-
-            # Update servo and status indicator
-            if detected and not self.object_detected:
-                self.send_servo_command(SERVO_OPEN)
-                self.object_detected = True
-                self.status_label.config(fg="lime", text="●")
-                print("Paper detected - Opening servo")
-            elif not detected and self.object_detected:
-                self.send_servo_command(SERVO_CLOSE)
-                self.object_detected = False
-                self.status_label.config(fg="red", text="●")
-                print("No paper - Closing servo")
-
-            # Calculate FPS
-            self.fps = 1.0 / (time.time() - t_start + 1e-6)
+            # Run YOLO detection
+            results = model(frame, imgsz=416, conf=CONF_THRESHOLD, device="cpu", verbose=False)
             
-            # Draw FPS on video
-            cv2.putText(display, f"{self.fps:.1f}fps", (5, 15), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
+            paper_detected = False
+            max_conf = 0.0
+            
+            for r in results:
+                if r.boxes:
+                    for box in r.boxes:
+                        cls_id = int(box.cls[0])
+                        conf = float(box.conf[0])
+                        class_name = model.names[cls_id]
+                        
+                        if class_name.lower() == "paper" and conf >= CONF_THRESHOLD:
+                            paper_detected = True
+                            max_conf = max(max_conf, conf)
+                            
+                            # Draw bounding box
+                            x1, y1, x2, y2 = map(int, box.xyxy[0])
+                            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 3)
+                            cv2.putText(frame, f"Paper {conf:.2f}", (x1, y1 - 10),
+                                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+            
+            # Update detection count
+            if paper_detected:
+                state.paper_detected_count += 1
+                state.last_detection_conf = max_conf
+                if state.paper_detected_count == 1:
+                    self.add_log(f"Paper detected! Confidence: {max_conf:.2f}")
+            else:
+                if state.paper_detected_count > 0:
+                    self.add_log("Paper no longer detected")
+                state.paper_detected_count = 0
+                state.last_detection_conf = 0.0
+            
+            # Read weight from Arduino
+            if arduino:
+                try:
+                    while arduino.in_waiting:
+                        line = arduino.readline().decode('utf-8').strip().lower()
+                        if "weigth:" in line:
+                            value_str = line.replace("weigth:", "").replace("kg", "").strip()
+                            try:
+                                old_weight = state.weight_kg
+                                state.weight_kg = float(value_str)
+                                if abs(old_weight - state.weight_kg) > 0.1:
+                                    self.add_log(f"Weight updated: {state.weight_kg:.2f} kg")
+                            except:
+                                state.weight_kg = 0
+                except:
+                    pass
+            
+            # Servo control logic
+            if arduino:
+                if state.paper_detected_count >= OPEN_FRAMES_REQUIRED and state.weight_kg < MAX_WEIGHT_KG:
+                    if not state.servo_open:
+                        arduino.write(b"open\n")
+                        state.servo_open = True
+                        self.add_log(f"AUTO OPEN (weight: {state.weight_kg:.2f}kg)")
+                elif state.paper_detected_count < OPEN_FRAMES_REQUIRED:
+                    if state.servo_open and (time.time() - state.last_no_paper_time >= CLOSE_DELAY):
+                        arduino.write(b"close\n")
+                        state.servo_open = False
+                        self.add_log("AUTO CLOSE")
+                    if not state.servo_open:
+                        state.last_no_paper_time = time.time()
+            
+            # Update UI elements
+            self.update_stats()
+            
+            # Calculate FPS
+            state.frame_count += 1
+            if time.time() - state.last_fps_time >= 1.0:
+                state.fps = state.frame_count
+                state.frame_count = 0
+                state.last_fps_time = time.time()
+            
+            # Convert frame for display
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            img = Image.fromarray(frame_rgb)
+            imgtk = ImageTk.PhotoImage(image=img)
+            self.video_canvas.create_image(0, 0, anchor=tk.NW, image=imgtk)
+            self.video_canvas.imgtk = imgtk
+        
+        if state.running:
+            self.root.after(50, self.update_frame)
+    
+    def update_stats(self):
+        # Update confidence
+        conf_percent = int(state.last_detection_conf * 100)
+        self.conf_label.config(text=f"{conf_percent}%")
+        self.conf_progress['value'] = conf_percent
+        
+        # Update frames
+        self.frames_label.config(text=f"{state.paper_detected_count} / {OPEN_FRAMES_REQUIRED}")
+        self.frames_progress['value'] = (state.paper_detected_count / OPEN_FRAMES_REQUIRED) * 100
+        
+        # Update weight
+        self.weight_label.config(text=f"{state.weight_kg:.2f} kg")
+        
+        # Update servo status
+        if state.servo_open:
+            self.servo_status_label.config(text="OPEN", bg='#27AE60')
+        else:
+            self.servo_status_label.config(text="CLOSED", bg='#E74C3C')
+        
+        # Update FPS
+        self.fps_label.config(text=f"FPS: {state.fps}")
 
-            # Convert to Tk image
-            img = cv2.cvtColor(display, cv2.COLOR_BGR2RGB)
-            img = Image.fromarray(img)
-            self.imgtk = ImageTk.PhotoImage(image=img)
-            self.video_canvas.create_image(0, 0, anchor=tk.NW, image=self.imgtk)
-
-        # Dynamic delay
-        t_elapsed = time.time() - t_start
-        delay = max(1, int((1/15 - t_elapsed) * 1000))
-        self.root.after(delay, self.update_frame)
-
-    def stop(self):
-        self.running = False
-        self.cap.release()
+# =========================
+# Main
+# =========================
+def main():
+    print("[INFO] YOLO GUI detection started")
+    
+    root = tk.Tk()
+    app = PaperDetectionGUI(root)
+    
+    def on_closing():
+        state.running = False
+        cap.release()
         if arduino:
             arduino.close()
-        self.root.destroy()
-
-# ===========================
-# RUN APP
-# ===========================
-if __name__ == "__main__":
-    root = tk.Tk()
-    app = AIWeightApp(root)
-    root.protocol("WM_DELETE_WINDOW", app.stop)
+        print("[INFO] Camera released, Serial closed")
+        root.destroy()
+    
+    root.protocol("WM_DELETE_WINDOW", on_closing)
     root.mainloop()
+
+if __name__ == "__main__":
+    main()
