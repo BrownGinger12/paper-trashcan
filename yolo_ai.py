@@ -3,7 +3,6 @@ import cv2
 import time
 import serial
 import tkinter as tk
-from PIL import Image, ImageTk
 
 # =========================
 # CONFIGURATION
@@ -32,7 +31,7 @@ except Exception as e:
 model = YOLO("/home/ecechmsu/Desktop/paper-trashcan/my_model.pt")
 
 # =========================
-# Camera setup (reduced resolution for Pi)
+# Camera setup (headless - no display)
 # =========================
 cap = cv2.VideoCapture(0)
 cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
@@ -52,75 +51,77 @@ class SystemState:
         self.last_detection_conf = 0.0
         self.last_no_paper_time = 0
         self.running = True
-        self.detected_material = "NONE"  # "PAPER", "PLASTIC", or "NONE"
+        self.detected_material = "NONE"
 
 state = SystemState()
 
 # =========================
-# Minimal GUI Class
+# UI-Only GUI Class (No Camera View)
 # =========================
-class MinimalGUI:
+class InfoDisplayGUI:
     def __init__(self, root):
         self.root = root
-        self.root.title("Waste Detection System")
+        self.root.title("Smart Trash Bin")
         self.root.configure(bg='black')
+        self.root.geometry("800x600")
         
-        # Make fullscreen (optional - comment out if not needed)
-        # self.root.attributes('-fullscreen', True)
+        # Make fullscreen (optional)
+        self.root.attributes('-fullscreen', True)
         
         # Main container
         main_frame = tk.Frame(self.root, bg='black')
         main_frame.pack(fill=tk.BOTH, expand=True)
         
-        # Video canvas
-        self.video_canvas = tk.Canvas(main_frame, width=640, height=480, 
-                                      bg='black', highlightthickness=0)
-        self.video_canvas.pack(pady=10)
-        
-        # Material Detection Display (BIG TEXT)
+        # Material Detection Display (HUGE)
         self.material_label = tk.Label(main_frame, text="NO DETECTION", 
-                                       font=('Arial', 48, 'bold'), 
-                                       bg='black', fg='#888')
-        self.material_label.pack(pady=20)
+                                       font=('Arial', 72, 'bold'), 
+                                       bg='black', fg='white')
+        self.material_label.pack(expand=True, pady=40)
         
-        # Bin Status Display (BIG TEXT)
+        # Bin Status Display (HUGE)
         self.bin_status_label = tk.Label(main_frame, text="", 
-                                         font=('Arial', 42, 'bold'), 
+                                         font=('Arial', 60, 'bold'), 
                                          bg='black', fg='#E74C3C')
-        self.bin_status_label.pack(pady=10)
+        self.bin_status_label.pack(expand=True, pady=20)
         
-        # Info bar
-        info_frame = tk.Frame(main_frame, bg='black')
-        info_frame.pack(fill=tk.X, padx=20, pady=10)
+        # Info container
+        info_container = tk.Frame(main_frame, bg='black')
+        info_container.pack(expand=True, fill=tk.BOTH, pady=40)
         
-        # Battery display
-        battery_frame = tk.Frame(info_frame, bg='black')
-        battery_frame.pack(side=tk.LEFT, padx=20)
+        # Battery display (LEFT)
+        battery_frame = tk.Frame(info_container, bg='black')
+        battery_frame.pack(side=tk.LEFT, expand=True)
         
-        tk.Label(battery_frame, text="🔋 BATTERY", 
-                font=('Arial', 14, 'bold'), bg='black', fg='#888').pack()
+        tk.Label(battery_frame, text="🔋", 
+                font=('Arial', 60), bg='black', fg='white').pack()
+        tk.Label(battery_frame, text="BATTERY", 
+                font=('Arial', 24, 'bold'), bg='black', fg='#888').pack()
         self.battery_label = tk.Label(battery_frame, text="100%", 
-                                      font=('Arial', 32, 'bold'), 
+                                      font=('Arial', 80, 'bold'), 
                                       bg='black', fg='#27AE60')
         self.battery_label.pack()
         
-        # Weight display
-        weight_frame = tk.Frame(info_frame, bg='black')
-        weight_frame.pack(side=tk.RIGHT, padx=20)
+        # Weight display (RIGHT)
+        weight_frame = tk.Frame(info_container, bg='black')
+        weight_frame.pack(side=tk.RIGHT, expand=True)
         
-        tk.Label(weight_frame, text="⚖️ WEIGHT", 
-                font=('Arial', 14, 'bold'), bg='black', fg='#888').pack()
+        tk.Label(weight_frame, text="⚖️", 
+                font=('Arial', 60), bg='black', fg='white').pack()
+        tk.Label(weight_frame, text="WEIGHT", 
+                font=('Arial', 24, 'bold'), bg='black', fg='#888').pack()
         self.weight_label = tk.Label(weight_frame, text="0.00 kg", 
-                                     font=('Arial', 32, 'bold'), 
+                                     font=('Arial', 80, 'bold'), 
                                      bg='black', fg='#3498DB')
         self.weight_label.pack()
         
         # Bind ESC key to exit
         self.root.bind('<Escape>', lambda e: self.on_closing())
         
-        self.update_frame()
+        # Start processing
+        self.process_detection()
         
-    def update_frame(self):
+    def process_detection(self):
+        # Read and process camera frame (no display)
         ret, frame = cap.read()
         if ret:
             # Run YOLO detection
@@ -130,7 +131,6 @@ class MinimalGUI:
             paper_detected = False
             plastic_detected = False
             max_conf = 0.0
-            detected_class = "NONE"
             
             for r in results:
                 if r.boxes:
@@ -139,33 +139,15 @@ class MinimalGUI:
                         conf = float(box.conf[0])
                         class_name = model.names[cls_id].lower()
                         
-                        # Debug: print what's being detected
-                        print(f"[DEBUG] Detected: {class_name} with confidence {conf:.2f}")
-                        
                         if conf >= CONF_THRESHOLD:
                             if class_name == "paper":
                                 paper_detected = True
                                 if conf > max_conf:
                                     max_conf = conf
-                                    detected_class = "PAPER"
-                                
-                                # Draw bounding box (green for paper)
-                                x1, y1, x2, y2 = map(int, box.xyxy[0])
-                                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 3)
-                                cv2.putText(frame, f"PAPER {conf:.2f}", (x1, y1 - 10),
-                                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                            
                             elif class_name == "plastic":
                                 plastic_detected = True
                                 if conf > max_conf:
                                     max_conf = conf
-                                    detected_class = "PLASTIC"
-                                
-                                # Draw bounding box (blue for plastic)
-                                x1, y1, x2, y2 = map(int, box.xyxy[0])
-                                cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 165, 0), 3)
-                                cv2.putText(frame, f"PLASTIC {conf:.2f}", (x1, y1 - 10),
-                                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 165, 0), 2)
             
             # Update detection counts
             if paper_detected:
@@ -203,9 +185,8 @@ class MinimalGUI:
                 except:
                     pass
             
-            # Servo control logic (ONLY for paper, not plastic)
+            # Servo control logic (ONLY for paper)
             if arduino:
-                # Only open for paper detection
                 if state.paper_detected_count >= OPEN_FRAMES_REQUIRED and state.weight_kg < MAX_WEIGHT_KG:
                     if not state.servo_open:
                         arduino.write(b"open\n")
@@ -219,52 +200,45 @@ class MinimalGUI:
                     if not state.servo_open:
                         state.last_no_paper_time = time.time()
             
-            # Update display
-            self.update_info()
-            
-            # Convert and display frame
-            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            img = Image.fromarray(frame_rgb)
-            imgtk = ImageTk.PhotoImage(image=img)
-            self.video_canvas.create_image(0, 0, anchor=tk.NW, image=imgtk)
-            self.video_canvas.imgtk = imgtk
+            # Update UI
+            self.update_display()
         
         if state.running:
-            self.root.after(50, self.update_frame)
+            self.root.after(50, self.process_detection)
     
-    def update_info(self):
+    def update_display(self):
         # Update material detection display
         if state.detected_material == "PAPER":
-            self.material_label.config(text="📄 PAPER DETECTED", fg='#27AE60')
+            self.material_label.config(text="📄 PAPER", fg='#27AE60')
         elif state.detected_material == "PLASTIC":
-            self.material_label.config(text="♻️ PLASTIC DETECTED", fg='#3498DB')
+            self.material_label.config(text="♻️ PLASTIC", fg='#E74C3C')
         else:
             self.material_label.config(text="NO DETECTION", fg='#888')
         
         # Update bin full status
         if state.weight_kg >= MAX_WEIGHT_KG:
-            self.bin_status_label.config(text="⚠️ BIN IS FULL ⚠️", fg='#E74C3C')
+            self.bin_status_label.config(text="⚠️ BIN FULL ⚠️")
         else:
             self.bin_status_label.config(text="")
         
-        # Update battery with color
+        # Update battery
         battery = state.battery_percent
         if battery > 50:
-            battery_color = '#27AE60'  # Green
+            battery_color = '#27AE60'
         elif battery > 20:
-            battery_color = '#F39C12'  # Orange
+            battery_color = '#F39C12'
         else:
-            battery_color = '#E74C3C'  # Red
+            battery_color = '#E74C3C'
         
         self.battery_label.config(text=f"{battery}%", fg=battery_color)
         
-        # Update weight with color based on fullness
+        # Update weight
         if state.weight_kg >= MAX_WEIGHT_KG:
-            weight_color = '#E74C3C'  # Red when full
+            weight_color = '#E74C3C'
         elif state.weight_kg >= MAX_WEIGHT_KG * 0.8:
-            weight_color = '#F39C12'  # Orange when 80% full
+            weight_color = '#F39C12'
         else:
-            weight_color = '#3498DB'  # Blue normal
+            weight_color = '#3498DB'
         
         self.weight_label.config(text=f"{state.weight_kg:.2f} kg", fg=weight_color)
     
@@ -280,12 +254,11 @@ class MinimalGUI:
 # Main
 # =========================
 def main():
-    print("[INFO] Starting waste detection system for Raspberry Pi")
+    print("[INFO] Starting info display UI (no camera view)")
     print(f"[INFO] Model classes: {model.names}")
-    print(f"[INFO] Confidence threshold: {CONF_THRESHOLD}")
     
     root = tk.Tk()
-    app = MinimalGUI(root)
+    app = InfoDisplayGUI(root)
     
     root.protocol("WM_DELETE_WINDOW", app.on_closing)
     root.mainloop()
