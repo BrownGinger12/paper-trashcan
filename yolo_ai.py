@@ -3,7 +3,7 @@ import cv2
 import time
 import serial
 import tkinter as tk
-from PIL import Image, ImageTk
+from tkinter import font as tkfont
 
 # =========================
 # CONFIGURATION
@@ -11,9 +11,9 @@ from PIL import Image, ImageTk
 CONF_THRESHOLD = 0.85
 SERIAL_PORT = '/dev/ttyUSB0'
 BAUD_RATE = 9600
-MAX_WEIGHT_KG = 1.0
 OPEN_FRAMES_REQUIRED = 5
 CLOSE_DELAY = 0.5
+
 
 # =========================
 # Initialize Serial to Arduino
@@ -26,18 +26,20 @@ except Exception as e:
     print(f"[ERROR] Could not connect to Arduino: {e}")
     arduino = None
 
+
 # =========================
 # Load YOLO model
 # =========================
 model = YOLO("/home/ecechmsu/Desktop/paper-trashcan/my_model.pt")
 
 # =========================
-# Camera setup (reduced resolution for Pi)
+# Camera setup (headless — detection only, no display)
 # =========================
 cap = cv2.VideoCapture(0)
-cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+cap.set(cv2.CAP_PROP_FRAME_WIDTH, 416)
+cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 416)
 cap.set(cv2.CAP_PROP_FPS, 10)
+
 
 # =========================
 # Global State
@@ -45,286 +47,351 @@ cap.set(cv2.CAP_PROP_FPS, 10)
 class SystemState:
     def __init__(self):
         self.servo_open = False
-        self.fill_level = 0.0
-        self.distance = 0.0
-        self.voltage = 0.0
+        self.fill_level = 0.0        # % from ultrasonic
         self.battery_percent = 100
         self.paper_detected_count = 0
-        self.plastic_detected_count = 0
         self.last_detection_conf = 0.0
+        self.last_detection_class = None
         self.last_no_paper_time = 0
         self.running = True
-        self.detected_material = "NONE"
 
 state = SystemState()
 
+
 # =========================
-# Enhanced GUI Class
+# Theme Colors
 # =========================
-class EnhancedGUI:
+BG          = "#0D0F14"
+PANEL       = "#13161E"
+ACCENT_GRN  = "#00E5A0"
+ACCENT_RED  = "#FF4560"
+ACCENT_YLW  = "#FFB830"
+ACCENT_BLU  = "#4D9EFF"
+TEXT_PRI    = "#EAEEF5"
+TEXT_SEC    = "#5A6070"
+BORDER      = "#1E2330"
+
+
+# =========================
+# GUI Class
+# =========================
+class PaperTrashcanGUI:
     def __init__(self, root):
         self.root = root
-        self.root.title("Smart Waste Detection System")
-        self.root.configure(bg='#1a1a1a')
-        
-        # Make fullscreen
+        self.root.title("Paper Trashcan Monitor")
+        self.root.configure(bg=BG)
+        self.root.overrideredirect(True)
         self.root.attributes('-fullscreen', True)
-        
-        # Main container with padding
-        main_frame = tk.Frame(self.root, bg='#1a1a1a')
-        main_frame.pack(fill=tk.BOTH, expand=True, padx=15, pady=15)
-        
-        # Top status bar
-        top_bar = tk.Frame(main_frame, bg='#2d2d2d', relief=tk.RAISED, bd=2)
-        top_bar.pack(fill=tk.X, pady=(0, 10))
-        
-        tk.Label(top_bar, text="🗑️ SMART TRASH BIN", 
-                font=('Arial', 20, 'bold'), bg='#2d2d2d', fg='white').pack(pady=10)
-        
-        # Video canvas with border
-        video_frame = tk.Frame(main_frame, bg='#2d2d2d', relief=tk.SUNKEN, bd=3)
-        video_frame.pack(pady=5)
-        
-        self.video_canvas = tk.Canvas(video_frame, width=640, height=480, 
-                                      bg='black', highlightthickness=0)
-        self.video_canvas.pack(padx=2, pady=2)
-        
-        # Detection status (prominent)
-        status_frame = tk.Frame(main_frame, bg='#2d2d2d', relief=tk.RAISED, bd=2)
-        status_frame.pack(fill=tk.X, pady=10)
-        
-        self.detection_label = tk.Label(status_frame, text="⏳ WAITING FOR WASTE", 
-                                        font=('Arial', 42, 'bold'), 
-                                        bg='#2d2d2d', fg='#FFD700')
-        self.detection_label.pack(pady=15)
-        
-        # Warning label (bin full / plastic rejection)
-        self.warning_label = tk.Label(status_frame, text="", 
-                                      font=('Arial', 32, 'bold'), 
-                                      bg='#2d2d2d', fg='#FF4444')
-        self.warning_label.pack(pady=5)
-        
-        # Stats grid (2 columns when normal, 1 when full)
-        self.stats_container = tk.Frame(main_frame, bg='#1a1a1a')
-        self.stats_container.pack(fill=tk.X, pady=10)
-        
-        # Battery
-        self.battery_frame = tk.Frame(self.stats_container, bg='#2d2d2d', relief=tk.RAISED, bd=2)
-        self.battery_frame.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=5)
-        
-        tk.Label(self.battery_frame, text="🔋", 
-                font=('Arial', 30), bg='#2d2d2d', fg='white').pack(pady=(10, 0))
-        tk.Label(self.battery_frame, text="BATTERY", 
-                font=('Arial', 12, 'bold'), bg='#2d2d2d', fg='#888').pack()
-        self.battery_label = tk.Label(self.battery_frame, text="100%", 
-                                      font=('Arial', 36, 'bold'), 
-                                      bg='#2d2d2d', fg='#27AE60')
-        self.battery_label.pack(pady=(5, 10))
-        
-        # Fill Level
-        self.fill_frame = tk.Frame(self.stats_container, bg='#2d2d2d', relief=tk.RAISED, bd=2)
-        self.fill_frame.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=5)
-        
-        tk.Label(self.fill_frame, text="📊", 
-                font=('Arial', 30), bg='#2d2d2d', fg='white').pack(pady=(10, 0))
-        tk.Label(self.fill_frame, text="FILL LEVEL", 
-                font=('Arial', 12, 'bold'), bg='#2d2d2d', fg='#888').pack()
-        self.fill_label = tk.Label(self.fill_frame, text="0%", 
-                                   font=('Arial', 36, 'bold'), 
-                                   bg='#2d2d2d', fg='#3498DB')
-        self.fill_label.pack(pady=(5, 10))
-        
-        # Bin Full Message (hidden by default)
-        self.bin_full_frame = tk.Frame(main_frame, bg='#E74C3C', relief=tk.RAISED, bd=5)
-        
-        tk.Label(self.bin_full_frame, text="⚠️", 
-                font=('Arial', 80), bg='#E74C3C', fg='white').pack(pady=(20, 0))
-        tk.Label(self.bin_full_frame, text="BIN IS FULL!", 
-                font=('Arial', 60, 'bold'), bg='#E74C3C', fg='white').pack(pady=10)
-        tk.Label(self.bin_full_frame, text="PLEASE EMPTY THE BIN", 
-                font=('Arial', 30, 'bold'), bg='#E74C3C', fg='white').pack(pady=(0, 20))
-        
-        # Bind ESC key to exit
-        self.root.bind('<Escape>', lambda e: self.on_closing())
-        
+        self.root.geometry('800x480+0+0')
+        self.root.focus_set()
+        self.root.config(cursor="none")
+
+        self._build_ui()
         self.update_frame()
-        
+
+    # --------------------------------------------------
+    def _build_ui(self):
+        root = self.root
+
+        # ── Header bar ─────────────────────────────────
+        header = tk.Frame(root, bg=PANEL, height=52)
+        header.pack(fill=tk.X, side=tk.TOP)
+        header.pack_propagate(False)
+
+        tk.Label(header, text="● SMART PAPER BIN",
+                 font=("Courier", 13, "bold"),
+                 bg=PANEL, fg=ACCENT_GRN).pack(side=tk.LEFT, padx=20, pady=14)
+
+        self.time_label = tk.Label(header, text="",
+                                   font=("Courier", 11),
+                                   bg=PANEL, fg=TEXT_SEC)
+        self.time_label.pack(side=tk.RIGHT, padx=20)
+
+        # ── Body ───────────────────────────────────────
+        body = tk.Frame(root, bg=BG)
+        body.pack(fill=tk.BOTH, expand=True, padx=20, pady=16)
+
+        # Left column — Detection panel
+        left = tk.Frame(body, bg=PANEL, bd=0, highlightthickness=1,
+                        highlightbackground=BORDER)
+        left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 10))
+
+        tk.Label(left, text="DETECTION STATUS",
+                 font=("Courier", 9, "bold"),
+                 bg=PANEL, fg=TEXT_SEC).pack(anchor="w", padx=20, pady=(18, 0))
+
+        # Large detection icon
+        self.icon_label = tk.Label(left, text="📄",
+                                   font=("Arial", 64),
+                                   bg=PANEL)
+        self.icon_label.pack(pady=(10, 0))
+
+        # Main status text
+        self.status_label = tk.Label(left, text="SCANNING...",
+                                     font=("Courier", 22, "bold"),
+                                     bg=PANEL, fg=TEXT_SEC)
+        self.status_label.pack(pady=(4, 0))
+
+        # Confidence badge
+        self.conf_frame = tk.Frame(left, bg=PANEL)
+        self.conf_frame.pack(pady=(8, 0))
+
+        tk.Label(self.conf_frame, text="ACCURACY",
+                 font=("Courier", 8), bg=PANEL, fg=TEXT_SEC).pack()
+
+        self.conf_label = tk.Label(self.conf_frame, text="— %",
+                                   font=("Courier", 32, "bold"),
+                                   bg=PANEL, fg=TEXT_SEC)
+        self.conf_label.pack()
+
+        # Servo status chip
+        self.servo_chip = tk.Label(left, text="  LID: CLOSED  ",
+                                   font=("Courier", 9, "bold"),
+                                   bg=TEXT_SEC, fg=BG, padx=6, pady=3)
+        self.servo_chip.pack(pady=(12, 18))
+
+        # Right column — Metrics
+        right = tk.Frame(body, bg=BG)
+        right.pack(side=tk.RIGHT, fill=tk.BOTH, padx=(0, 0))
+        right.config(width=220)
+        right.pack_propagate(False)
+
+        # ── Capacity card ──────────────────────────────
+        cap_card = tk.Frame(right, bg=PANEL, bd=0,
+                            highlightthickness=1, highlightbackground=BORDER)
+        cap_card.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+
+        tk.Label(cap_card, text="BIN CAPACITY",
+                 font=("Courier", 9, "bold"),
+                 bg=PANEL, fg=TEXT_SEC).pack(anchor="w", padx=16, pady=(14, 4))
+
+        self.cap_value = tk.Label(cap_card, text="0%",
+                                  font=("Courier", 38, "bold"),
+                                  bg=PANEL, fg=ACCENT_BLU)
+        self.cap_value.pack(padx=16, anchor="w")
+
+        # Progress bar background
+        bar_bg = tk.Frame(cap_card, bg=BORDER, height=12)
+        bar_bg.pack(fill=tk.X, padx=16, pady=(6, 4))
+        bar_bg.pack_propagate(False)
+
+        self.cap_bar = tk.Frame(bar_bg, bg=ACCENT_BLU, height=12)
+        self.cap_bar.place(x=0, y=0, relheight=1.0, relwidth=0.0)
+
+        self.cap_status = tk.Label(cap_card, text="EMPTY",
+                                   font=("Courier", 9),
+                                   bg=PANEL, fg=ACCENT_BLU)
+        self.cap_status.pack(anchor="w", padx=16, pady=(0, 14))
+
+        # ── Battery card ───────────────────────────────
+        bat_card = tk.Frame(right, bg=PANEL, bd=0,
+                            highlightthickness=1, highlightbackground=BORDER)
+        bat_card.pack(fill=tk.BOTH, expand=True)
+
+        tk.Label(bat_card, text="BATTERY",
+                 font=("Courier", 9, "bold"),
+                 bg=PANEL, fg=TEXT_SEC).pack(anchor="w", padx=16, pady=(14, 4))
+
+        self.bat_value = tk.Label(bat_card, text="100%",
+                                  font=("Courier", 38, "bold"),
+                                  bg=PANEL, fg=ACCENT_GRN)
+        self.bat_value.pack(padx=16, anchor="w")
+
+        # Battery bar background
+        bat_bg = tk.Frame(bat_card, bg=BORDER, height=12)
+        bat_bg.pack(fill=tk.X, padx=16, pady=(6, 4))
+        bat_bg.pack_propagate(False)
+
+        self.bat_bar = tk.Frame(bat_bg, bg=ACCENT_GRN, height=12)
+        self.bat_bar.place(x=0, y=0, relheight=1.0, relwidth=1.0)
+
+        self.bat_status = tk.Label(bat_card, text="NOMINAL",
+                                   font=("Courier", 9),
+                                   bg=PANEL, fg=ACCENT_GRN)
+        self.bat_status.pack(anchor="w", padx=16, pady=(0, 14))
+
+        # ── Footer ─────────────────────────────────────
+        footer = tk.Frame(root, bg=BORDER, height=1)
+        footer.pack(fill=tk.X, side=tk.BOTTOM)
+
+        self.root.bind('<Escape>', lambda e: self.on_closing())
+
+    # --------------------------------------------------
     def update_frame(self):
         ret, frame = cap.read()
         if ret:
-            # Run YOLO detection
-            results = model(frame, imgsz=416, conf=CONF_THRESHOLD, 
-                          device="cpu", verbose=False)
-            
+            results = model(frame, imgsz=416, conf=CONF_THRESHOLD,
+                            device="cpu", verbose=False)
+
             paper_detected = False
             plastic_detected = False
+            mixed_detected = False
             max_conf = 0.0
-            
+            detected_class = None
+
             for r in results:
                 if r.boxes:
                     for box in r.boxes:
                         cls_id = int(box.cls[0])
                         conf = float(box.conf[0])
                         class_name = model.names[cls_id].lower()
-                        
                         if conf >= CONF_THRESHOLD:
-                            x1, y1, x2, y2 = map(int, box.xyxy[0])
-                            
                             if class_name == "paper":
                                 paper_detected = True
-                                max_conf = max(max_conf, conf)
-                                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 4)
-                                cv2.putText(frame, f"PAPER {conf:.2f}", (x1, y1 - 10),
-                                           cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-                            
                             elif class_name == "plastic":
                                 plastic_detected = True
-                                max_conf = max(max_conf, conf)
-                                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 4)
-                                cv2.putText(frame, f"PLASTIC {conf:.2f}", (x1, y1 - 10),
-                                           cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
-            
-            # Update detection counts
+
+                            if conf > max_conf:
+                                max_conf = conf
+                                detected_class = class_name
+
+            if paper_detected and plastic_detected:
+                mixed_detected = True
+
             if paper_detected:
                 state.paper_detected_count += 1
-                state.plastic_detected_count = 0
-                state.detected_material = "PAPER"
-                state.last_detection_conf = max_conf
-            elif plastic_detected:
-                state.plastic_detected_count += 1
-                state.paper_detected_count = 0
-                state.detected_material = "PLASTIC"
-                state.last_detection_conf = max_conf
             else:
                 state.paper_detected_count = 0
-                state.plastic_detected_count = 0
-                state.detected_material = "NONE"
+
+            if detected_class:
+                state.last_detection_class = "mixed" if mixed_detected else detected_class
+                state.last_detection_conf = max_conf
+            else:
+                state.last_detection_class = None
                 state.last_detection_conf = 0.0
-            
-            # Read from Arduino
+
+            # ── Read serial from Arduino ────────────────
             if arduino:
                 try:
                     while arduino.in_waiting:
-                        line = arduino.readline().decode('utf-8').strip()
-                        
-                        if "Distance:" in line:
+                        raw = arduino.readline().decode('utf-8', errors='ignore').strip().lower()
+
+                        # "fill level: 45.3 %" → extract 45.3
+                        if raw.startswith("fill level:"):
+                            val = raw.replace("fill level:", "").replace("%", "").strip()
                             try:
-                                state.distance = float(line.split(":")[1].replace("cm", "").strip())
+                                state.fill_level = float(val)
                             except:
                                 pass
-                        
-                        elif "Fill Level:" in line:
+
+                        # "battery: 87 %" → extract 87
+                        elif raw.startswith("battery:"):
+                            val = raw.replace("battery:", "").replace("%", "").strip()
                             try:
-                                state.fill_level = float(line.split(":")[1].replace("%", "").strip())
-                            except:
-                                pass
-                        
-                        elif "Voltage:" in line:
-                            try:
-                                state.voltage = float(line.split(":")[1].replace("V", "").strip())
-                            except:
-                                pass
-                        
-                        elif "Battery:" in line:
-                            try:
-                                state.battery_percent = int(line.split(":")[1].replace("%", "").strip())
+                                state.battery_percent = int(float(val))
                             except:
                                 pass
                 except:
                     pass
-            
-            # Servo control logic (ONLY for paper, not plastic)
+
+            # ── Servo logic ─────────────────────────────
             if arduino:
-                # Check if bin is full
-                if state.fill_level >= 95:
-                    # Don't open if bin is full
-                    if state.servo_open:
-                        arduino.write(b"close\n")
-                        state.servo_open = False
-                        print("[CLOSE] Bin full")
-                elif state.paper_detected_count >= OPEN_FRAMES_REQUIRED:
+                if (state.paper_detected_count >= OPEN_FRAMES_REQUIRED
+                        and state.fill_level < 100.0
+                        and not plastic_detected):
                     if not state.servo_open:
                         arduino.write(b"open\n")
                         state.servo_open = True
-                        print(f"[OPEN] PAPER detected - fill: {state.fill_level:.1f}%")
-                elif state.paper_detected_count < OPEN_FRAMES_REQUIRED:
-                    if state.servo_open and (time.time() - state.last_no_paper_time >= CLOSE_DELAY):
+                        print(f"[OPEN] fill:{state.fill_level:.1f}%")
+                else:
+                    if state.servo_open and (time.time() - state.last_no_paper_time > CLOSE_DELAY):
                         arduino.write(b"close\n")
                         state.servo_open = False
                         print("[CLOSE]")
                     if not state.servo_open:
                         state.last_no_paper_time = time.time()
-            
-            # Update display
-            self.update_info()
-            
-            # Convert and display frame
-            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            img = Image.fromarray(frame_rgb)
-            imgtk = ImageTk.PhotoImage(image=img)
-            self.video_canvas.create_image(0, 0, anchor=tk.NW, image=imgtk)
-            self.video_canvas.imgtk = imgtk
-        
+
+            self._refresh_ui()
+
         if state.running:
             self.root.after(50, self.update_frame)
-    
-    def update_info(self):
-        # Check if bin is full
-        bin_is_full = state.fill_level >= 95
-        
-        if bin_is_full:
-            # Hide normal stats, show BIN FULL message
-            self.stats_container.pack_forget()
-            self.bin_full_frame.pack(fill=tk.BOTH, expand=True, pady=20)
-            
-            # Update detection to show what was detected but bin is full
-            if state.detected_material == "PAPER":
-                self.detection_label.config(text="📄 PAPER DETECTED", fg='#FFD700')
-            elif state.detected_material == "PLASTIC":
-                self.detection_label.config(text="♻️ PLASTIC DETECTED", fg='#FFD700')
-            else:
-                self.detection_label.config(text="⏳ NO DETECTION", fg='#888')
-            
-            self.warning_label.config(text="")
+
+    # --------------------------------------------------
+    def _refresh_ui(self):
+        # ── Clock ───────────────────────────────────────
+        self.time_label.config(text=time.strftime("%H:%M:%S"))
+
+        # ── Detection panel ─────────────────────────────
+        detected = (state.last_detection_class == "paper"
+                    and state.paper_detected_count >= OPEN_FRAMES_REQUIRED)
+
+        if state.last_detection_class == "plastic":
+            self.status_label.config(text="PLASTIC DETECTED", fg=ACCENT_RED)
+            self.icon_label.config(text="🧴", fg=ACCENT_RED)
+            conf_pct = f"{state.last_detection_conf * 100:.1f}%"
+            self.conf_label.config(text=conf_pct, fg=ACCENT_RED)
+        elif state.last_detection_class == "mixed":
+            self.status_label.config(text="PAPER + PLASTIC", fg=ACCENT_RED)
+            self.icon_label.config(text="⚠️", fg=ACCENT_RED)
+            conf_pct = f"{state.last_detection_conf * 100:.1f}%"
+            self.conf_label.config(text=conf_pct, fg=ACCENT_RED)
+        elif detected:
+            self.status_label.config(text="PAPER DETECTED", fg=ACCENT_GRN)
+            self.icon_label.config(text="📄", fg=ACCENT_GRN)
+            conf_pct = f"{state.last_detection_conf * 100:.1f}%"
+            self.conf_label.config(text=conf_pct, fg=ACCENT_GRN)
+        elif state.paper_detected_count > 0:
+            self.status_label.config(text="DETECTING PAPER...", fg=ACCENT_YLW)
+            self.icon_label.config(text="📄", fg=ACCENT_YLW)
+            conf_pct = f"{state.last_detection_conf * 100:.1f}%"
+            self.conf_label.config(text=conf_pct, fg=ACCENT_YLW)
         else:
-            # Show normal stats, hide BIN FULL message
-            self.bin_full_frame.pack_forget()
-            self.stats_container.pack(fill=tk.X, pady=10)
-            
-            # Update detection label based on what's detected
-            if state.detected_material == "PAPER":
-                self.detection_label.config(text="📄 PAPER DETECTED", fg='#27AE60')
-            elif state.detected_material == "PLASTIC":
-                self.detection_label.config(text="♻️ PLASTIC DETECTED", fg='#E74C3C')
-            else:
-                self.detection_label.config(text="⏳ NO DETECTION", fg='#888')
-            
-            # Update warning for plastic
-            if state.detected_material == "PLASTIC":
-                self.warning_label.config(text="🚫 PLASTIC NOT ALLOWED 🚫")
-            else:
-                self.warning_label.config(text="")
-        
-        # Always update battery
-        battery = state.battery_percent
-        if battery > 50:
-            battery_color = '#27AE60'
-        elif battery > 20:
-            battery_color = '#F39C12'
+            self.status_label.config(text="NO PAPER", fg=TEXT_SEC)
+            self.icon_label.config(text="📄", fg=TEXT_SEC)
+            self.conf_label.config(text="— %", fg=TEXT_SEC)
+
+        # Servo chip
+        if state.servo_open:
+            self.servo_chip.config(text="  LID: OPEN  ", bg=ACCENT_GRN, fg=BG)
         else:
-            battery_color = '#E74C3C'
-        self.battery_label.config(text=f"{battery}%", fg=battery_color)
-        
-        # Always update fill level
+            self.servo_chip.config(text="  LID: CLOSED  ", bg=BORDER, fg=TEXT_SEC)
+
+        # ── Capacity ────────────────────────────────────
         fill = state.fill_level
-        if fill >= 95:
-            fill_color = '#E74C3C'
+        fill_ratio = fill / 100.0
+
+        if fill >= 100:
+            cap_color = ACCENT_RED
+            cap_text = "BIN IS FULL"
+            cap_font = ("Courier", 16, "bold")
+        elif fill >= 90:
+            cap_color = ACCENT_RED
+            cap_text  = "FULL — EMPTY BIN"
+            cap_font = ("Courier", 9)
         elif fill >= 70:
-            fill_color = '#F39C12'
+            cap_color = ACCENT_YLW
+            cap_text  = "GETTING FULL"
+            cap_font = ("Courier", 9)
         else:
-            fill_color = '#3498DB'
-        self.fill_label.config(text=f"{int(fill)}%", fg=fill_color)
-    
+            cap_color = ACCENT_BLU
+            cap_text  = "OK"
+            cap_font = ("Courier", 9)
+
+        self.cap_value.config(text=f"{fill:.0f}%", fg=cap_color)
+        self.cap_bar.config(bg=cap_color)
+        self.cap_bar.place(relwidth=fill_ratio)
+        self.cap_status.config(text=cap_text, fg=cap_color, font=cap_font)
+
+        # ── Battery ─────────────────────────────────────
+        bat = state.battery_percent
+        bat_ratio = bat / 100.0
+
+        if bat > 50:
+            bat_color = ACCENT_GRN
+            bat_text  = "NOMINAL"
+        elif bat > 20:
+            bat_color = ACCENT_YLW
+            bat_text  = "LOW — CHARGE SOON"
+        else:
+            bat_color = ACCENT_RED
+            bat_text  = "CRITICAL"
+
+        self.bat_value.config(text=f"{bat}%", fg=bat_color)
+        self.bat_bar.config(bg=bat_color)
+        self.bat_bar.place(relwidth=bat_ratio)
+        self.bat_status.config(text=bat_text, fg=bat_color)
+
+    # --------------------------------------------------
     def on_closing(self):
         state.running = False
         cap.release()
@@ -333,16 +400,14 @@ class EnhancedGUI:
         print("[INFO] Shutdown complete")
         self.root.destroy()
 
+
 # =========================
 # Main
 # =========================
 def main():
-    print("[INFO] Starting enhanced waste detection system")
-    print(f"[INFO] Model classes: {model.names}")
-    
+    print("[INFO] Starting Paper Trashcan GUI")
     root = tk.Tk()
-    app = EnhancedGUI(root)
-    
+    app = PaperTrashcanGUI(root)
     root.protocol("WM_DELETE_WINDOW", app.on_closing)
     root.mainloop()
 
