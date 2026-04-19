@@ -64,88 +64,64 @@ class MinimalGUI:
         self.root = root
         self.root.title("Waste Detection System")
         self.root.configure(bg='black')
-        self.root.geometry("800x900")  # Set explicit window size
-        
-        print("[DEBUG] Initializing GUI...")
-        print(f"[DEBUG] Screen size: {root.winfo_screenwidth()}x{root.winfo_screenheight()}")
         
         # Make fullscreen (optional - comment out if not needed)
         # self.root.attributes('-fullscreen', True)
         
         # Main container
         main_frame = tk.Frame(self.root, bg='black')
-        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-        print("[DEBUG] Main frame created")
-        
-        # Material Detection Display (BIG TEXT) - ABOVE VIDEO
-        self.material_label = tk.Label(main_frame, text="NO DETECTION", 
-                                       font=('Arial', 48, 'bold'), 
-                                       bg='black', fg='white')
-        self.material_label.pack(pady=10)
-        print("[DEBUG] Material label created")
+        main_frame.pack(fill=tk.BOTH, expand=True)
         
         # Video canvas
         self.video_canvas = tk.Canvas(main_frame, width=640, height=480, 
-                                      bg='gray', highlightthickness=2, 
-                                      highlightbackground='white')
+                                      bg='black', highlightthickness=0)
         self.video_canvas.pack(pady=10)
-        print("[DEBUG] Video canvas created")
         
-        # Bin Status Display (BIG TEXT) - BELOW VIDEO
-        self.bin_status_label = tk.Label(main_frame, text="SYSTEM READY", 
-                                         font=('Arial', 36, 'bold'), 
-                                         bg='black', fg='yellow')
+        # Material Detection Display (BIG TEXT)
+        self.material_label = tk.Label(main_frame, text="NO DETECTION", 
+                                       font=('Arial', 48, 'bold'), 
+                                       bg='black', fg='#888')
+        self.material_label.pack(pady=20)
+        
+        # Bin Status Display (BIG TEXT)
+        self.bin_status_label = tk.Label(main_frame, text="", 
+                                         font=('Arial', 42, 'bold'), 
+                                         bg='black', fg='#E74C3C')
         self.bin_status_label.pack(pady=10)
-        print("[DEBUG] Bin status label created")
         
-        # Info bar - BELOW EVERYTHING
+        # Info bar
         info_frame = tk.Frame(main_frame, bg='black')
-        info_frame.pack(fill=tk.X, pady=20)
-        print("[DEBUG] Info frame created")
+        info_frame.pack(fill=tk.X, padx=20, pady=10)
         
-        # Battery display - LEFT
+        # Battery display
         battery_frame = tk.Frame(info_frame, bg='black')
-        battery_frame.pack(side=tk.LEFT, padx=40, expand=True)
+        battery_frame.pack(side=tk.LEFT, padx=20)
         
         tk.Label(battery_frame, text="🔋 BATTERY", 
-                font=('Arial', 16, 'bold'), bg='black', fg='white').pack()
+                font=('Arial', 14, 'bold'), bg='black', fg='#888').pack()
         self.battery_label = tk.Label(battery_frame, text="100%", 
-                                      font=('Arial', 40, 'bold'), 
+                                      font=('Arial', 32, 'bold'), 
                                       bg='black', fg='#27AE60')
         self.battery_label.pack()
-        print("[DEBUG] Battery display created")
         
-        # Weight display - RIGHT
+        # Weight display
         weight_frame = tk.Frame(info_frame, bg='black')
-        weight_frame.pack(side=tk.RIGHT, padx=40, expand=True)
+        weight_frame.pack(side=tk.RIGHT, padx=20)
         
         tk.Label(weight_frame, text="⚖️ WEIGHT", 
-                font=('Arial', 16, 'bold'), bg='black', fg='white').pack()
+                font=('Arial', 14, 'bold'), bg='black', fg='#888').pack()
         self.weight_label = tk.Label(weight_frame, text="0.00 kg", 
-                                     font=('Arial', 40, 'bold'), 
+                                     font=('Arial', 32, 'bold'), 
                                      bg='black', fg='#3498DB')
         self.weight_label.pack()
-        print("[DEBUG] Weight display created")
         
         # Bind ESC key to exit
         self.root.bind('<Escape>', lambda e: self.on_closing())
-        
-        print("[DEBUG] Starting update loop...")
-        
-        # Force initial UI update
-        self.update_info()
-        self.root.update()
         
         self.update_frame()
         
     def update_frame(self):
         ret, frame = cap.read()
-        if not ret:
-            print("[ERROR] Failed to read from camera")
-            if state.running:
-                self.root.after(50, self.update_frame)
-            return
-            
         if ret:
             # Run YOLO detection
             results = model(frame, imgsz=416, conf=CONF_THRESHOLD, 
@@ -265,40 +241,11 @@ class MinimalGUI:
         else:
             self.material_label.config(text="NO DETECTION", fg='#888')
         
-        print(f"[DEBUG] Material label updated: {state.detected_material}")
-        
         # Update bin full status
         if state.weight_kg >= MAX_WEIGHT_KG:
             self.bin_status_label.config(text="⚠️ BIN IS FULL ⚠️", fg='#E74C3C')
-            print(f"[DEBUG] Bin full warning shown")
         else:
             self.bin_status_label.config(text="")
-        
-        # Update battery with color
-        battery = state.battery_percent
-        if battery > 50:
-            battery_color = '#27AE60'  # Green
-        elif battery > 20:
-            battery_color = '#F39C12'  # Orange
-        else:
-            battery_color = '#E74C3C'  # Red
-        
-        self.battery_label.config(text=f"{battery}%", fg=battery_color)
-        print(f"[DEBUG] Battery updated: {battery}%")
-        
-        # Update weight with color based on fullness
-        if state.weight_kg >= MAX_WEIGHT_KG:
-            weight_color = '#E74C3C'  # Red when full
-        elif state.weight_kg >= MAX_WEIGHT_KG * 0.8:
-            weight_color = '#F39C12'  # Orange when 80% full
-        else:
-            weight_color = '#3498DB'  # Blue normal
-        
-        self.weight_label.config(text=f"{state.weight_kg:.2f} kg", fg=weight_color)
-        print(f"[DEBUG] Weight updated: {state.weight_kg:.2f} kg")
-        
-        # Force update
-        self.root.update_idletasks()
         
         # Update battery with color
         battery = state.battery_percent
